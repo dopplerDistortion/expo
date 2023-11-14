@@ -22,6 +22,7 @@ import expo.modules.updates.manifest.EmbeddedManifest
 import expo.modules.updates.manifest.ManifestMetadata
 import expo.modules.updates.procedures.CheckForUpdateProcedure
 import expo.modules.updates.procedures.FetchUpdateProcedure
+import expo.modules.updates.procedures.RelaunchProcedure
 import expo.modules.updates.selectionpolicy.SelectionPolicyFactory
 import expo.modules.updates.procedures.StartupProcedure
 import expo.modules.updates.statemachine.UpdatesStateChangeEventSender
@@ -71,7 +72,6 @@ class EnabledUpdatesController(
     updatesDirectory,
     fileDownloader,
     selectionPolicy,
-    stateMachine,
     logger,
     object : StartupProcedure.StartupProcedureCallback {
       @Synchronized
@@ -96,6 +96,10 @@ class EnabledUpdatesController(
             }
           )
         }
+      }
+
+      override fun onRequestRelaunch(shouldRunReaper: Boolean, callback: LauncherCallback) {
+        relaunchReactApplication(shouldRunReaper, callback)
       }
     }
   )
@@ -140,11 +144,24 @@ class EnabledUpdatesController(
     BuildData.ensureBuildDataIsConsistent(updatesConfiguration, databaseHolder.database)
     databaseHolder.releaseDatabase()
 
-    startupProcedure.run()
+    stateMachine.queueExecution(startupProcedure)
   }
 
-  private fun relaunchReactApplication(callback: LauncherCallback) {
-    startupProcedure.relaunchReactApplication(true, callback)
+  private fun relaunchReactApplication(shouldRunReaper: Boolean, callback: LauncherCallback) {
+    val procedure = RelaunchProcedure(
+      context,
+      updatesConfiguration,
+      databaseHolder,
+      updatesDirectory,
+      fileDownloader,
+      selectionPolicy,
+      reactNativeHost,
+      getCurrentLauncher = { startupProcedure.launcher!! },
+      setCurrentLauncher = { currentLauncher -> startupProcedure.setLauncher(currentLauncher) },
+      shouldRunReaper = shouldRunReaper,
+      callback
+    )
+    stateMachine.queueExecution(procedure)
   }
 
   override fun sendUpdateStateChangeEventToBridge(eventType: UpdatesStateEventType, context: UpdatesStateContext) {
@@ -181,6 +198,7 @@ class EnabledUpdatesController(
       callback.onFailure(object : CodedException("ERR_UPDATES_RELOAD", "Cannot relaunch without a launched update.", null) {})
     } else {
       relaunchReactApplication(
+        shouldRunReaper = true,
         object : LauncherCallback {
           override fun onFailure(e: Exception) {
             callback.onFailure(e.toCodedException())
@@ -199,17 +217,17 @@ class EnabledUpdatesController(
   }
 
   override fun checkForUpdate(callback: IUpdatesController.ModuleCallback<IUpdatesController.CheckForUpdateResult>) {
-    val procedure = CheckForUpdateProcedure(context, updatesConfiguration, databaseHolder, logger, fileDownloader, selectionPolicy, stateMachine, launchedUpdate) {
+    val procedure = CheckForUpdateProcedure(context, updatesConfiguration, databaseHolder, logger, fileDownloader, selectionPolicy, launchedUpdate) {
       callback.onSuccess(it)
     }
-    procedure.run()
+    stateMachine.queueExecution(procedure)
   }
 
   override fun fetchUpdate(callback: IUpdatesController.ModuleCallback<IUpdatesController.FetchUpdateResult>) {
-    val procedure = FetchUpdateProcedure(context, updatesConfiguration, databaseHolder, updatesDirectory, fileDownloader, selectionPolicy, stateMachine, launchedUpdate) {
+    val procedure = FetchUpdateProcedure(context, updatesConfiguration, databaseHolder, updatesDirectory, fileDownloader, selectionPolicy, launchedUpdate) {
       callback.onSuccess(it)
     }
-    procedure.run()
+    stateMachine.queueExecution(procedure)
   }
 
   override fun getExtraParams(callback: IUpdatesController.ModuleCallback<Bundle>) {

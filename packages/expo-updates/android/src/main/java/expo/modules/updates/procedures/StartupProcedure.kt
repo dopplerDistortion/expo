@@ -1,24 +1,15 @@
 package expo.modules.updates.procedures
 
 import android.content.Context
-import android.os.AsyncTask
 import android.os.Handler
 import android.os.HandlerThread
-import android.os.Looper
-import android.util.Log
-import com.facebook.react.ReactApplication
 import com.facebook.react.ReactInstanceManager
-import com.facebook.react.ReactNativeHost
-import com.facebook.react.bridge.JSBundleLoader
-import expo.modules.updates.EnabledUpdatesController
 import expo.modules.updates.UpdatesConfiguration
 import expo.modules.updates.db.DatabaseHolder
-import expo.modules.updates.db.Reaper
 import expo.modules.updates.db.entity.AssetEntity
 import expo.modules.updates.db.entity.UpdateEntity
 import expo.modules.updates.errorrecovery.ErrorRecovery
 import expo.modules.updates.errorrecovery.ErrorRecoveryDelegate
-import expo.modules.updates.launcher.DatabaseLauncher
 import expo.modules.updates.launcher.Launcher
 import expo.modules.updates.launcher.NoDatabaseLauncher
 import expo.modules.updates.loader.FileDownloader
@@ -32,11 +23,9 @@ import expo.modules.updates.logging.UpdatesLogger
 import expo.modules.updates.manifest.UpdateManifest
 import expo.modules.updates.selectionpolicy.SelectionPolicy
 import expo.modules.updates.statemachine.UpdatesStateEvent
-import expo.modules.updates.statemachine.UpdatesStateMachine
 import expo.modules.updates.statemachine.UpdatesStateValue
 import org.json.JSONObject
 import java.io.File
-import java.lang.ref.WeakReference
 
 class StartupProcedure(
   private val context: Context,
@@ -45,10 +34,9 @@ class StartupProcedure(
   private val updatesDirectory: File,
   private val fileDownloader: FileDownloader,
   private val selectionPolicy: SelectionPolicy,
-  private val stateMachine: UpdatesStateMachine,
   private val logger: UpdatesLogger,
   private val callback: StartupProcedureCallback
-) {
+) : StateMachineProcedure() {
   interface StartupProcedureCallback {
     fun onFinished()
 
@@ -64,15 +52,17 @@ class StartupProcedure(
       class Error(val exception: Exception) : LegacyJSEvent(Type.ERROR)
     }
     fun onLegacyJSEvent(event: LegacyJSEvent)
+
+    fun onRequestRelaunch(shouldRunReaper: Boolean, callback: Launcher.LauncherCallback)
   }
 
-  private var reactNativeHost: WeakReference<ReactNativeHost>? = if (context is ReactApplication) {
-    WeakReference(context.reactNativeHost)
-  } else {
-    null
-  }
+  private lateinit var stateMachineProcedureContext: ProcedureContext
 
-  private var launcher: Launcher? = null
+  var launcher: Launcher? = null
+    private set
+  fun setLauncher(launcher: Launcher) {
+    this.launcher = launcher
+  }
 
   val launchAssetFile
     get() = launcher?.launchAssetFile
@@ -114,27 +104,6 @@ class StartupProcedure(
         notifyController()
       }
 
-      override fun onCachedUpdateLoaded(update: UpdateEntity): Boolean {
-        return true
-      }
-
-      override fun onRemoteCheckForUpdateStarted() {
-        stateMachine.processEvent(UpdatesStateEvent.Check())
-      }
-
-      override fun onRemoteCheckForUpdateFinished(result: LoaderTask.RemoteCheckResult) {
-        val event = when (result) {
-          is LoaderTask.RemoteCheckResult.NoUpdateAvailable -> UpdatesStateEvent.CheckCompleteUnavailable()
-          is LoaderTask.RemoteCheckResult.UpdateAvailable -> UpdatesStateEvent.CheckCompleteWithUpdate(result.manifest)
-          is LoaderTask.RemoteCheckResult.RollBackToEmbedded -> UpdatesStateEvent.CheckCompleteWithRollback(result.commitTime)
-        }
-        stateMachine.processEvent(event)
-      }
-
-      override fun onRemoteUpdateManifestResponseManifestLoaded(updateManifest: UpdateManifest) {
-        remoteLoadStatus = ErrorRecoveryDelegate.RemoteLoadStatus.NEW_UPDATE_LOADING
-      }
-
       override fun onSuccess(launcher: Launcher, isUpToDate: Boolean) {
         if (remoteLoadStatus == ErrorRecoveryDelegate.RemoteLoadStatus.NEW_UPDATE_LOADING && isUpToDate) {
           remoteLoadStatus = ErrorRecoveryDelegate.RemoteLoadStatus.IDLE
@@ -143,8 +112,33 @@ class StartupProcedure(
         notifyController()
       }
 
+      override fun onFinishedAllLoading() {
+        stateMachineProcedureContext.onComplete()
+      }
+
+      override fun onCachedUpdateLoaded(update: UpdateEntity): Boolean {
+        return true
+      }
+
+      override fun onRemoteCheckForUpdateStarted() {
+        stateMachineProcedureContext.processStateEvent(UpdatesStateEvent.Check())
+      }
+
+      override fun onRemoteCheckForUpdateFinished(result: LoaderTask.RemoteCheckResult) {
+        val event = when (result) {
+          is LoaderTask.RemoteCheckResult.NoUpdateAvailable -> UpdatesStateEvent.CheckCompleteUnavailable()
+          is LoaderTask.RemoteCheckResult.UpdateAvailable -> UpdatesStateEvent.CheckCompleteWithUpdate(result.manifest)
+          is LoaderTask.RemoteCheckResult.RollBackToEmbedded -> UpdatesStateEvent.CheckCompleteWithRollback(result.commitTime)
+        }
+        stateMachineProcedureContext.processStateEvent(event)
+      }
+
+      override fun onRemoteUpdateManifestResponseManifestLoaded(updateManifest: UpdateManifest) {
+        remoteLoadStatus = ErrorRecoveryDelegate.RemoteLoadStatus.NEW_UPDATE_LOADING
+      }
+
       override fun onRemoteUpdateLoadStarted() {
-        stateMachine.processEvent(UpdatesStateEvent.Download())
+        stateMachineProcedureContext.processStateEvent(UpdatesStateEvent.Download())
       }
 
       override fun onRemoteUpdateAssetLoaded(
@@ -180,21 +174,21 @@ class StartupProcedure(
 
             // Since errors can happen through a number of paths, we do these checks
             // to make sure the state machine is valid
-            when (stateMachine.state) {
+            when (stateMachineProcedureContext.getCurrentState()) {
               UpdatesStateValue.Idle -> {
-                stateMachine.processEvent(UpdatesStateEvent.Download())
-                stateMachine.processEvent(
+                stateMachineProcedureContext.processStateEvent(UpdatesStateEvent.Download())
+                stateMachineProcedureContext.processStateEvent(
                   UpdatesStateEvent.DownloadError(exception.message ?: "")
                 )
               }
               UpdatesStateValue.Checking -> {
-                stateMachine.processEvent(
+                stateMachineProcedureContext.processStateEvent(
                   UpdatesStateEvent.CheckError(exception.message ?: "")
                 )
               }
               else -> {
                 // .downloading
-                stateMachine.processEvent(
+                stateMachineProcedureContext.processStateEvent(
                   UpdatesStateEvent.DownloadError(exception.message ?: "")
                 )
               }
@@ -207,7 +201,7 @@ class StartupProcedure(
             remoteLoadStatus = ErrorRecoveryDelegate.RemoteLoadStatus.NEW_UPDATE_LOADED
             logger.info("UpdatesController onBackgroundUpdateFinished: Update available", UpdatesErrorCode.None)
             callback.onLegacyJSEvent(StartupProcedureCallback.LegacyJSEvent.UpdateAvailable(update.manifest))
-            stateMachine.processEvent(
+            stateMachineProcedureContext.processStateEvent(
               UpdatesStateEvent.DownloadCompleteWithUpdate(update.manifest)
             )
           }
@@ -216,8 +210,8 @@ class StartupProcedure(
             logger.error("UpdatesController onBackgroundUpdateFinished: No update available", UpdatesErrorCode.NoUpdatesAvailable)
             callback.onLegacyJSEvent(StartupProcedureCallback.LegacyJSEvent.NoUpdateAvailable())
             // TODO: handle rollbacks properly, but this works for now
-            if (stateMachine.state == UpdatesStateValue.Downloading) {
-              stateMachine.processEvent(UpdatesStateEvent.DownloadComplete())
+            if (stateMachineProcedureContext.getCurrentState() == UpdatesStateValue.Downloading) {
+              stateMachineProcedureContext.processStateEvent(UpdatesStateEvent.DownloadComplete())
             }
           }
         }
@@ -226,7 +220,8 @@ class StartupProcedure(
     }
   )
 
-  fun run() {
+  override fun run(stateMachineProcedureContext: ProcedureContext) {
+    this.stateMachineProcedureContext = stateMachineProcedureContext
     initializeDatabaseHandler()
     initializeErrorRecovery()
     loaderTask.start(context)
@@ -295,7 +290,7 @@ class StartupProcedure(
         })
       }
 
-      override fun relaunch(callback: Launcher.LauncherCallback) { relaunchReactApplication(false, callback) }
+      override fun relaunch(callback: Launcher.LauncherCallback) { this@StartupProcedure.callback.onRequestRelaunch(shouldRunReaper = false, callback) }
       override fun throwException(exception: Exception) { throw exception }
 
       override fun markFailedLaunchForLaunchedUpdate() {
@@ -324,81 +319,5 @@ class StartupProcedure(
       override fun getCheckAutomaticallyConfiguration() = updatesConfiguration.checkOnLaunch
       override fun getLaunchedUpdateSuccessfulLaunchCount() = launchedUpdate?.successfulLaunchCount ?: 0
     })
-  }
-
-  fun relaunchReactApplication(shouldRunReaper: Boolean, callback: Launcher.LauncherCallback) {
-    val host = reactNativeHost?.get()
-    if (host == null) {
-      callback.onFailure(Exception("Could not reload application. Ensure you have passed the correct instance of ReactApplication into UpdatesController.initialize()."))
-      return
-    }
-
-    stateMachine.processEvent(UpdatesStateEvent.Restart())
-
-    val oldLaunchAssetFile = launcher!!.launchAssetFile
-
-    val newLauncher = DatabaseLauncher(
-      updatesConfiguration,
-      updatesDirectory,
-      fileDownloader,
-      selectionPolicy
-    )
-    newLauncher.launch(
-      databaseHolder.database,
-      context,
-      object : Launcher.LauncherCallback {
-        override fun onFailure(e: Exception) {
-          callback.onFailure(e)
-        }
-
-        override fun onSuccess() {
-          launcher = newLauncher
-          databaseHolder.releaseDatabase()
-
-          val instanceManager = host.reactInstanceManager
-
-          val newLaunchAssetFile = launcher!!.launchAssetFile
-          if (newLaunchAssetFile != null && newLaunchAssetFile != oldLaunchAssetFile) {
-            // Unfortunately, even though RN exposes a way to reload an application,
-            // it assumes that the JS bundle will stay at the same location throughout
-            // the entire lifecycle of the app. Since we need to change the location of
-            // the bundle, we need to use reflection to set an otherwise inaccessible
-            // field of the ReactInstanceManager.
-            try {
-              val newJSBundleLoader = JSBundleLoader.createFileLoader(newLaunchAssetFile)
-              val jsBundleLoaderField = instanceManager.javaClass.getDeclaredField("mBundleLoader")
-              jsBundleLoaderField.isAccessible = true
-              jsBundleLoaderField[instanceManager] = newJSBundleLoader
-            } catch (e: Exception) {
-              Log.e(TAG, "Could not reset JSBundleLoader in ReactInstanceManager", e)
-            }
-          }
-          callback.onSuccess()
-          val handler = Handler(Looper.getMainLooper())
-          handler.post { instanceManager.recreateReactContextInBackground() }
-          if (shouldRunReaper) {
-            runReaper()
-          }
-          stateMachine.reset()
-        }
-      }
-    )
-  }
-
-  private fun runReaper() {
-    AsyncTask.execute {
-      Reaper.reapUnusedUpdates(
-        updatesConfiguration,
-        databaseHolder.database,
-        updatesDirectory,
-        launchedUpdate,
-        selectionPolicy
-      )
-      databaseHolder.releaseDatabase()
-    }
-  }
-
-  companion object {
-    private val TAG = EnabledUpdatesController::class.java.simpleName
   }
 }

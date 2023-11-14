@@ -14,7 +14,6 @@ import expo.modules.updates.logging.UpdatesLogger
 import expo.modules.updates.manifest.EmbeddedManifest
 import expo.modules.updates.selectionpolicy.SelectionPolicy
 import expo.modules.updates.statemachine.UpdatesStateEvent
-import expo.modules.updates.statemachine.UpdatesStateMachine
 
 class CheckForUpdateProcedure(
   private val context: Context,
@@ -23,12 +22,11 @@ class CheckForUpdateProcedure(
   private val updatesLogger: UpdatesLogger,
   private val fileDownloader: FileDownloader,
   private val selectionPolicy: SelectionPolicy,
-  private val stateMachine: UpdatesStateMachine,
   private val launchedUpdate: UpdateEntity?,
   private val callback: (IUpdatesController.CheckForUpdateResult) -> Unit
-) {
-  fun run() {
-    stateMachine.processEvent(UpdatesStateEvent.Check())
+) : StateMachineProcedure() {
+  override fun run(stateMachineProcedureContext: ProcedureContext) {
+    stateMachineProcedureContext.processStateEvent(UpdatesStateEvent.Check())
 
     AsyncTask.execute {
       val embeddedUpdate = EmbeddedManifest.get(context, updatesConfiguration)?.updateEntity
@@ -45,8 +43,9 @@ class CheckForUpdateProcedure(
         context,
         object : FileDownloader.RemoteUpdateDownloadCallback {
           override fun onFailure(message: String, e: Exception) {
-            stateMachine.processEvent(UpdatesStateEvent.CheckError(message))
+            stateMachineProcedureContext.processStateEvent(UpdatesStateEvent.CheckError(message))
             callback(IUpdatesController.CheckForUpdateResult.ErrorResult(e, message))
+            stateMachineProcedureContext.onComplete()
           }
 
           override fun onSuccess(updateResponse: UpdateResponse) {
@@ -61,7 +60,8 @@ class CheckForUpdateProcedure(
                       LoaderTask.RemoteCheckResultNotAvailableReason.ROLLBACK_NO_EMBEDDED
                     )
                   )
-                  stateMachine.processEvent(UpdatesStateEvent.CheckCompleteUnavailable())
+                  stateMachineProcedureContext.processStateEvent(UpdatesStateEvent.CheckCompleteUnavailable())
+                  stateMachineProcedureContext.onComplete()
                   return
                 }
 
@@ -71,7 +71,8 @@ class CheckForUpdateProcedure(
                       LoaderTask.RemoteCheckResultNotAvailableReason.ROLLBACK_NO_EMBEDDED
                     )
                   )
-                  stateMachine.processEvent(UpdatesStateEvent.CheckCompleteUnavailable())
+                  stateMachineProcedureContext.processStateEvent(UpdatesStateEvent.CheckCompleteUnavailable())
+                  stateMachineProcedureContext.onComplete()
                   return
                 }
 
@@ -87,12 +88,14 @@ class CheckForUpdateProcedure(
                       LoaderTask.RemoteCheckResultNotAvailableReason.ROLLBACK_REJECTED_BY_SELECTION_POLICY
                     )
                   )
-                  stateMachine.processEvent(UpdatesStateEvent.CheckCompleteUnavailable())
+                  stateMachineProcedureContext.processStateEvent(UpdatesStateEvent.CheckCompleteUnavailable())
+                  stateMachineProcedureContext.onComplete()
                   return
                 }
 
                 callback(IUpdatesController.CheckForUpdateResult.RollBackToEmbedded(updateDirective.commitTime))
-                stateMachine.processEvent(UpdatesStateEvent.CheckCompleteWithRollback(updateDirective.commitTime))
+                stateMachineProcedureContext.processStateEvent(UpdatesStateEvent.CheckCompleteWithRollback(updateDirective.commitTime))
+                stateMachineProcedureContext.onComplete()
                 return
               }
             }
@@ -104,6 +107,7 @@ class CheckForUpdateProcedure(
                 )
               )
               UpdatesStateEvent.CheckCompleteUnavailable()
+              stateMachineProcedureContext.onComplete()
               return
             }
 
@@ -111,7 +115,8 @@ class CheckForUpdateProcedure(
               // this shouldn't ever happen, but if we don't have anything to compare
               // the new manifest to, let the user know an update is available
               callback(IUpdatesController.CheckForUpdateResult.UpdateAvailable(updateManifest))
-              stateMachine.processEvent(UpdatesStateEvent.CheckCompleteWithUpdate(updateManifest.manifest.getRawJson()))
+              stateMachineProcedureContext.processStateEvent(UpdatesStateEvent.CheckCompleteWithUpdate(updateManifest.manifest.getRawJson()))
+              stateMachineProcedureContext.onComplete()
               return
             }
 
@@ -143,7 +148,8 @@ class CheckForUpdateProcedure(
             }
             if (shouldLaunch) {
               callback(IUpdatesController.CheckForUpdateResult.UpdateAvailable(updateManifest))
-              stateMachine.processEvent(UpdatesStateEvent.CheckCompleteWithUpdate(updateManifest.manifest.getRawJson()))
+              stateMachineProcedureContext.processStateEvent(UpdatesStateEvent.CheckCompleteWithUpdate(updateManifest.manifest.getRawJson()))
+              stateMachineProcedureContext.onComplete()
               return
             } else {
               val reason = when (failedPreviously) {
@@ -151,7 +157,8 @@ class CheckForUpdateProcedure(
                 else -> LoaderTask.RemoteCheckResultNotAvailableReason.UPDATE_REJECTED_BY_SELECTION_POLICY
               }
               callback(IUpdatesController.CheckForUpdateResult.NoUpdateAvailable(reason))
-              stateMachine.processEvent(UpdatesStateEvent.CheckCompleteUnavailable())
+              stateMachineProcedureContext.processStateEvent(UpdatesStateEvent.CheckCompleteUnavailable())
+              stateMachineProcedureContext.onComplete()
               return
             }
           }

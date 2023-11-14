@@ -14,7 +14,6 @@ import expo.modules.updates.loader.UpdateDirective
 import expo.modules.updates.loader.UpdateResponse
 import expo.modules.updates.selectionpolicy.SelectionPolicy
 import expo.modules.updates.statemachine.UpdatesStateEvent
-import expo.modules.updates.statemachine.UpdatesStateMachine
 import java.io.File
 
 class FetchUpdateProcedure(
@@ -24,12 +23,11 @@ class FetchUpdateProcedure(
   private val updatesDirectory: File,
   private val fileDownloader: FileDownloader,
   private val selectionPolicy: SelectionPolicy,
-  private val stateMachine: UpdatesStateMachine,
   private val launchedUpdate: UpdateEntity?,
   private val callback: (IUpdatesController.FetchUpdateResult) -> Unit
-) {
-  fun run() {
-    stateMachine.processEvent(UpdatesStateEvent.Download())
+) : StateMachineProcedure() {
+  override fun run(stateMachineProcedureContext: ProcedureContext) {
+    stateMachineProcedureContext.processStateEvent(UpdatesStateEvent.Download())
 
     AsyncTask.execute {
       val database = databaseHolder.database
@@ -46,9 +44,10 @@ class FetchUpdateProcedure(
             override fun onFailure(e: Exception) {
               databaseHolder.releaseDatabase()
               callback(IUpdatesController.FetchUpdateResult.ErrorResult(e))
-              stateMachine.processEvent(
+              stateMachineProcedureContext.processStateEvent(
                 UpdatesStateEvent.DownloadError("Failed to download new update: ${e.message}")
               )
+              stateMachineProcedureContext.onComplete()
             }
 
             override fun onAssetLoaded(
@@ -96,14 +95,17 @@ class FetchUpdateProcedure(
 
                 if (didRollBackToEmbedded) {
                   callback(IUpdatesController.FetchUpdateResult.RollBackToEmbedded())
-                  stateMachine.processEvent(UpdatesStateEvent.DownloadCompleteWithRollback())
+                  stateMachineProcedureContext.processStateEvent(UpdatesStateEvent.DownloadCompleteWithRollback())
+                  stateMachineProcedureContext.onComplete()
                 } else {
                   if (availableUpdate == null) {
                     callback(IUpdatesController.FetchUpdateResult.Failure())
-                    stateMachine.processEvent(UpdatesStateEvent.DownloadComplete())
+                    stateMachineProcedureContext.processStateEvent(UpdatesStateEvent.DownloadComplete())
+                    stateMachineProcedureContext.onComplete()
                   } else {
                     callback(IUpdatesController.FetchUpdateResult.Success(availableUpdate))
-                    stateMachine.processEvent(UpdatesStateEvent.DownloadCompleteWithUpdate(availableUpdate.manifest))
+                    stateMachineProcedureContext.processStateEvent(UpdatesStateEvent.DownloadCompleteWithUpdate(availableUpdate.manifest))
+                    stateMachineProcedureContext.onComplete()
                   }
                 }
               }
