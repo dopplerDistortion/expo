@@ -54,7 +54,9 @@ public final class ModuleRegistry: Sequence {
    Registers modules exported by given modules provider.
    */
   public func register(fromProvider provider: ModulesProviderProtocol) {
-    provider.getModuleClasses().forEach { moduleType in
+    let moduleClasses = provider.getModuleClasses()
+
+    moduleClasses.forEach { moduleType in
       register(moduleType: moduleType)
     }
   }
