@@ -1,4 +1,3 @@
-
 -keepclassmembers class * {
   @expo.modules.core.interfaces.ExpoProp *;
 }
@@ -16,7 +15,11 @@
   *;
 }
 -keepclassmembers enum * implements expo.modules.kotlin.types.Enumerable {
-  *; 
+  *;
+}
+-keep,allowoptimization,allowobfuscation class * extends expo.modules.kotlin.modules.Module {
+  public <init>();
+  public expo.modules.kotlin.modules.ModuleDefinitionData definition();
 }
 
 -keepclassmembers class * implements expo.modules.kotlin.views.ExpoView {
